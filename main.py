@@ -7,18 +7,12 @@ from aiogram.filters import CommandStart
 from google import genai
 from groq import Groq
 from openai import OpenAI
-
-# --- SỬA LỖI MISTRAL IMPORT: Tự động nhận diện bản cũ và bản mới ---
-try:
-    from mistralai import Mistral
-except ImportError:
-    # Nếu Render cài bản cũ, hệ thống sẽ mượn MistralClient để giả lập class Mistral
-    from mistralai.client import MistralClient as Mistral
+from mistralai import Mistral
 
 # ==== KÍCH HOẠT WEB SERVER KEEP ALIVE ====
 from keep_alive import keep_alive
 
-# --- CẤU HÌNH TOKEN VÀ API KEY ---
+# --- CẤU HÌNH TOKEN VÀ API KEY CHÍNH THỨC ---
 TELEGRAM_TOKEN = "6367532329:AAEe9f501-n72-ZKLv4s5I_4O51vgznyXao"
 GEMINI_API_KEY = "AIzaSyDD1NhOh6aX58SdnK-3A5MYiQG-AqPDfJM"
 GROQ_API_KEY = "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"
@@ -33,20 +27,17 @@ openrouter_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPEN
 
 dp = Dispatcher()
 
-# --- CÁC HÀM GỌI API AN TOÀN ---
+# --- CÁC HÀM GỌI API AN TOÀN (Nếu lỗi tự động bỏ qua để không sập bot) ---
 async def fetch_mistral(prompt: str) -> str:
     try:
-        # Kiểm tra xem client đang dùng hàm của bản mới hay bản cũ để gọi cho đúng
-        if hasattr(mistral_client, 'chat') and hasattr(mistral_client.chat, 'complete_async'):
-            res = await mistral_client.chat.complete_async(model="mistral-large-latest", messages=[{"role": "user", "content": prompt}], timeout=8)
-            return f"[Mistral]: {res.choices[0].message.content}"
-        else:
-            # Lớp bọc dự phòng nếu hệ thống cài nhầm thư viện Mistral v0.x cũ
-            loop = asyncio.get_event_loop()
-            res = await loop.run_in_executor(None, lambda: mistral_client.chat(model="mistral-large-latest", messages=[{"role": "user", "content": prompt}]))
-            return f"[Mistral]: {res.choices[0].message.content}"
+        res = await mistral_client.chat.complete_async(
+            model="mistral-large-latest", 
+            messages=[{"role": "user", "content": prompt}], 
+            timeout=8
+        )
+        return f"[Mistral]: {res.choices[0].message.content}"
     except Exception as e:
-        logging.warning(f"Mistral API không phản hồi: {e}")
+        logging.warning(f"Mistral API gặp sự cố hoặc bị chặn: {e}")
         return ""
 
 async def fetch_openrouter(prompt: str) -> str:
@@ -61,7 +52,7 @@ async def fetch_openrouter(prompt: str) -> str:
         res = await loop.run_in_executor(None, call)
         return f"[DeepSeek]: {res.choices[0].message.content}"
     except Exception as e:
-        logging.warning(f"OpenRouter API không phản hồi: {e}")
+        logging.warning(f"OpenRouter API gặp sự cố hoặc bị chặn: {e}")
         return ""
 
 async def fetch_groq(prompt: str) -> str:
@@ -76,7 +67,7 @@ async def fetch_groq(prompt: str) -> str:
         res = await loop.run_in_executor(None, call)
         return f"[Llama3]: {res.choices[0].message.content}"
     except Exception as e:
-        logging.warning(f"Groq API không phản hồi: {e}")
+        logging.warning(f"Groq API gặp sự cố hoặc bị chặn: {e}")
         return ""
 
 async def fetch_gemini(prompt: str) -> str:
@@ -87,15 +78,16 @@ async def fetch_gemini(prompt: str) -> str:
         res = await loop.run_in_executor(None, call)
         return f"[Gemini]: {res.text}"
     except Exception as e:
-        logging.warning(f"Gemini API không phản hồi: {e}")
+        logging.warning(f"Gemini API gặp sự cố hoặc bị chặn: {e}")
         return ""
 
 # --- BỘ NÃO HỢP NHẤT & BIÊN TẬP VĂN PHONG CON NGƯỜI ---
 async def aggregate_responses(user_prompt: str, raw_responses: list) -> str:
+    # Lọc bỏ hoàn toàn các phản hồi trống từ các AI bị lỗi/chặn
     valid_responses = [resp for resp in raw_responses if resp.strip()]
     
     if not valid_responses:
-        return "Hiện tại hệ thống AI đang bận xử lý core dữ liệu. Bạn vui lòng thử lại sau ít phút nhé!"
+        return "Hiện tại tất cả các cổng kết nối dữ liệu AI đang bảo trì. Bạn vui lòng thử lại sau ít phút nhé!"
         
     combined_context = "\n\n=====\n\n".join(valid_responses)
     
@@ -121,6 +113,7 @@ async def aggregate_responses(user_prompt: str, raw_responses: list) -> str:
         ))
         return res.choices[0].message.content
     except Exception:
+        # Nếu bộ não gộp chính gặp lỗi, lấy kết quả của AI đầu tiên còn sống để trả về luôn
         return valid_responses[0].split("]: ", 1)[-1]
 
 # --- XỬ LÝ SỰ KIỆN TELEGRAM ---
@@ -135,9 +128,11 @@ async def command_start_handler(message: types.Message) -> None:
 
 @dp.message()
 async def handle_chat(message: types.Message) -> None:
+    # Hiển thị hiệu ứng "bot đang gõ..." trên Telegram
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
     start_time = time.time()
     
+    # Kích hoạt chạy song song đồng thời cả 4 core AI
     results = await asyncio.gather(
         fetch_mistral(message.text),
         fetch_openrouter(message.text),
@@ -145,6 +140,7 @@ async def handle_chat(message: types.Message) -> None:
         fetch_gemini(message.text)
     )
     
+    # Hợp nhất nội dung từ những cổng hoạt động tốt
     final_answer = await aggregate_responses(message.text, results)
     execution_time = round(time.time() - start_time, 2)
     
@@ -161,12 +157,15 @@ async def handle_chat(message: types.Message) -> None:
     try:
         await message.answer(final_answer, parse_mode="Markdown", disable_web_page_preview=True)
     except Exception:
+        # Dự phòng nếu chuỗi trả về chứa kí tự Markdown lỗi, gửi dạng văn bản thô
         await message.answer(final_answer, parse_mode=None)
 
 async def main() -> None:
+    # Khởi động Web Server Keep Alive nhận cổng động của Render
     keep_alive()
+    
     bot = Bot(token=TELEGRAM_TOKEN)
-    print("--- HỆ THỐNG PHÒNG THỦ LỖI ỔN ĐỊNH 100% ĐÃ HOẠT ĐỘNG ---")
+    print("--- HỆ THỐNG PHÒNG THỦ VÀ ĐỒNG BỘ SIÊU AI ĐÃ KHỞI ĐỘNG CHÍNH THỨC ---")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
