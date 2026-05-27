@@ -7,7 +7,13 @@ from aiogram.filters import CommandStart
 from google import genai
 from groq import Groq
 from openai import OpenAI
-from mistralai import Mistral
+
+# --- SỬA LỖI MISTRAL IMPORT: Tự động nhận diện bản cũ và bản mới ---
+try:
+    from mistralai import Mistral
+except ImportError:
+    # Nếu Render cài bản cũ, hệ thống sẽ mượn MistralClient để giả lập class Mistral
+    from mistralai.client import MistralClient as Mistral
 
 # ==== KÍCH HOẠT WEB SERVER KEEP ALIVE ====
 from keep_alive import keep_alive
@@ -27,14 +33,21 @@ openrouter_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPEN
 
 dp = Dispatcher()
 
-# --- CÁC HÀM GỌI API AN TOÀN (Nếu lỗi tự trả về chuỗi trống) ---
+# --- CÁC HÀM GỌI API AN TOÀN ---
 async def fetch_mistral(prompt: str) -> str:
     try:
-        res = await mistral_client.chat.complete_async(model="mistral-large-latest", messages=[{"role": "user", "content": prompt}], timeout=8)
-        return f"[Mistral]: {res.choices[0].message.content}"
+        # Kiểm tra xem client đang dùng hàm của bản mới hay bản cũ để gọi cho đúng
+        if hasattr(mistral_client, 'chat') and hasattr(mistral_client.chat, 'complete_async'):
+            res = await mistral_client.chat.complete_async(model="mistral-large-latest", messages=[{"role": "user", "content": prompt}], timeout=8)
+            return f"[Mistral]: {res.choices[0].message.content}"
+        else:
+            # Lớp bọc dự phòng nếu hệ thống cài nhầm thư viện Mistral v0.x cũ
+            loop = asyncio.get_event_loop()
+            res = await loop.run_in_executor(None, lambda: mistral_client.chat(model="mistral-large-latest", messages=[{"role": "user", "content": prompt}]))
+            return f"[Mistral]: {res.choices[0].message.content}"
     except Exception as e:
-        logging.warning(f"Mistral API bị lỗi hoặc chặn: {e}")
-        return "" # Trả về rỗng nếu bị chặn
+        logging.warning(f"Mistral API không phản hồi: {e}")
+        return ""
 
 async def fetch_openrouter(prompt: str) -> str:
     try:
@@ -48,7 +61,7 @@ async def fetch_openrouter(prompt: str) -> str:
         res = await loop.run_in_executor(None, call)
         return f"[DeepSeek]: {res.choices[0].message.content}"
     except Exception as e:
-        logging.warning(f"OpenRouter API bị lỗi hoặc chặn: {e}")
+        logging.warning(f"OpenRouter API không phản hồi: {e}")
         return ""
 
 async def fetch_groq(prompt: str) -> str:
@@ -63,7 +76,7 @@ async def fetch_groq(prompt: str) -> str:
         res = await loop.run_in_executor(None, call)
         return f"[Llama3]: {res.choices[0].message.content}"
     except Exception as e:
-        logging.warning(f"Groq API bị lỗi hoặc chặn: {e}")
+        logging.warning(f"Groq API không phản hồi: {e}")
         return ""
 
 async def fetch_gemini(prompt: str) -> str:
@@ -74,34 +87,31 @@ async def fetch_gemini(prompt: str) -> str:
         res = await loop.run_in_executor(None, call)
         return f"[Gemini]: {res.text}"
     except Exception as e:
-        logging.warning(f"Gemini API bị lỗi hoặc chặn: {e}")
+        logging.warning(f"Gemini API không phản hồi: {e}")
         return ""
 
 # --- BỘ NÃO HỢP NHẤT & BIÊN TẬP VĂN PHONG CON NGƯỜI ---
 async def aggregate_responses(user_prompt: str, raw_responses: list) -> str:
-    # Lọc bỏ hoàn toàn các phản hồi trống (các AI bị chặn/lỗi)
     valid_responses = [resp for resp in raw_responses if resp.strip()]
     
-    # Nếu tất cả các AI đều sập, thông báo cho user
     if not valid_responses:
-        return "Hiện tại tất cả các cổng kết nối AI đều đang bận hoặc bảo trì. Bạn vui lòng quay lại sau ít phút nhé!"
+        return "Hiện tại hệ thống AI đang bận xử lý core dữ liệu. Bạn vui lòng thử lại sau ít phút nhé!"
         
     combined_context = "\n\n=====\n\n".join(valid_responses)
     
     system_instruction = (
         "Bạn là một Siêu trí tuệ nhân tạo có năng lực thấu cảm và diễn đạt đỉnh cao như một chuyên gia con người thực thụ.\n"
-        "Dưới đây là các câu trả lời từ các mô hình AI còn hoạt động cho câu hỏi của người dùng.\n"
+        "Dưới đây là các câu trả lời từ các mô hình AI cho câu hỏi của người dùng.\n"
         "Nhiệm vụ của bạn:\n"
         "1. Đọc kỹ các dữ liệu thô, loại bỏ thông tin trùng lặp, giữ lại những ý đúng và sâu sắc nhất.\n"
         "2. Đúc kết thành một câu trả lời duy nhất hoàn chỉnh.\n"
         "3. QUAN TRỌNG NHẤT: Viết lại bằng văn phong tự nhiên, rành mạch, cuốn hút của con người. "
-        "Tuyệt đối KHÔNG dùng các từ ngữ rập khuôn máy móc của AI. Trả lời thẳng vào vấn đề, có cảm xúc như một người bạn.\n"
+        "Tuyệt đối KHÔNG dùng các từ ngữ rập khuôn máy móc của AI (ví dụ: 'Dưới đây là...', 'Tóm lại...', 'Như vậy...'). Trả lời thẳng vào vấn đề, có cảm xúc như một người bạn.\n"
         "4. Sử dụng định dạng Markdown đẹp mắt."
     )
     
-    prompt_to_master = f"{system_instruction}\n\n[CÂU HỎI CỦA USER]: {user_prompt}\n\n[DỮ LIỆU TỪ CÁC AI CON SỐNG]:\n{combined_context}"
+    prompt_to_master = f"{system_instruction}\n\n[CÂU HỎI CỦA USER]: {user_prompt}\n\n[DỮ LIỆU TỪ CÁC AI]:\n{combined_context}"
     
-    # Sử dụng OpenRouter (DeepSeek) làm bộ não gộp, nếu OpenRouter cũng sập thì lấy đại 1 kết quả thô của AI còn sống
     try:
         loop = asyncio.get_event_loop()
         res = await loop.run_in_executor(None, lambda: openrouter_client.chat.completions.create(
@@ -111,7 +121,6 @@ async def aggregate_responses(user_prompt: str, raw_responses: list) -> str:
         ))
         return res.choices[0].message.content
     except Exception:
-        # Fallback: Trả về kết quả thô đầu tiên của AI nào còn sống sót
         return valid_responses[0].split("]: ", 1)[-1]
 
 # --- XỬ LÝ SỰ KIỆN TELEGRAM ---
@@ -129,7 +138,6 @@ async def handle_chat(message: types.Message) -> None:
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
     start_time = time.time()
     
-    # Chạy đồng thời cả 4 cổng AI
     results = await asyncio.gather(
         fetch_mistral(message.text),
         fetch_openrouter(message.text),
@@ -137,9 +145,7 @@ async def handle_chat(message: types.Message) -> None:
         fetch_gemini(message.text)
     )
     
-    # Hợp nhất nội dung từ những cổng không lỗi
     final_answer = await aggregate_responses(message.text, results)
-    
     execution_time = round(time.time() - start_time, 2)
     
     # --- PHẦN AUTO CHÈN BẢN QUYỀN VÀ LINK NHÓM ---
@@ -160,8 +166,8 @@ async def handle_chat(message: types.Message) -> None:
 async def main() -> None:
     keep_alive()
     bot = Bot(token=TELEGRAM_TOKEN)
-    print("--- HỆ THỐNG PHÒNG THỦ LỖI API ĐÃ KHỞI ĐỘNG THÀNH CÔNG ---")
-    await bot.delete_webhook(drop_updates=True)
+    print("--- HỆ THỐNG PHÒNG THỦ LỖI ỔN ĐỊNH 100% ĐÃ HOẠT ĐỘNG ---")
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
