@@ -47,7 +47,7 @@ async def fetch_openrouter(prompt: str) -> str:
         logging.warning(f"OpenRouter API gặp sự cố: {e}")
         return ""
 
-# --- BỘ NÃO HỢP NHẤT DỮ LIỆU TIẾNG VIỆT ---
+# --- BỘ NÃO HỢP NHẤT DỮ LIỆU TIẾNG VIỆT (TÍNH NĂNG TỰ CỨU HỘ) ---
 async def aggregate_responses(user_prompt: str, raw_responses: list) -> str:
     # Lọc bỏ các phản hồi trống nếu một trong hai AI bị nghẽn
     valid_responses = [resp for resp in raw_responses if resp.strip()]
@@ -77,8 +77,15 @@ async def aggregate_responses(user_prompt: str, raw_responses: list) -> str:
             timeout=10
         ))
         return res.choices[0].message.content
-    except Exception:
-        # Nếu tổng hợp lỗi, lấy kết quả thô của AI còn hoạt động để trả về ngay
+    except Exception as e:
+        logging.error(f"Bộ não gộp OpenRouter gặp lỗi: {e}")
+        
+        # --- CƠ CHẾ PHÒNG THỦ: NẾU DEEPSEEK LỖI, LẤY NGAY GEMINI ĐỂ TRẢ LỜI ---
+        for resp in valid_responses:
+            if "[Gemini]" in resp:
+                return resp.replace("[Gemini]: ", "")
+        
+        # Cứu hộ cuối cùng: Lấy bất cứ thứ gì còn sống để trả về
         return valid_responses[0].split("]: ", 1)[-1]
 
 # --- SỰ KIỆN BOT TELEGRAM ---
@@ -86,7 +93,7 @@ async def aggregate_responses(user_prompt: str, raw_responses: list) -> str:
 async def command_start_handler(message: types.Message) -> None:
     await message.answer(
         f"🧠 **Chào {message.from_user.full_name}! Hệ thống Siêu AI Gộp Tiếng Việt đã kích hoạt!**\n\n"
-        f"Hệ thống đã tối ưu hóa, loại bỏ các API tiếng Anh để tập trung phản hồi tiếng Việt với tốc độ cao nhất.\n\n"
+        f"Hệ thống đã tối ưu hóa, loại bỏ hoàn toàn các API tiếng Anh để tập trung phản hồi tiếng Việt với tốc độ cao nhất.\n\n"
         f"📢 *Phát triển bởi:* [BaoHuyDevs Team](https://t.me/baohuydevs)",
         disable_web_page_preview=True, parse_mode="Markdown"
     )
@@ -117,6 +124,7 @@ async def handle_chat(message: types.Message) -> None:
     try:
         await message.answer(final_answer, parse_mode="Markdown", disable_web_page_preview=True)
     except Exception:
+        # Nếu định dạng Markdown bị lỗi ký tự đặc biệt, gửi văn bản thô để chống im lặng
         await message.answer(final_answer, parse_mode=None)
 
 # --- KHỞI CHẠY ĐỒNG BỘ PORT VÀ BOT ---
@@ -130,9 +138,11 @@ async def start_server_and_bot():
     
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, server.serve_forever)
-    print(f"--> [OK] Web Server giữ cổng đã mở thành công: {port}")
+    print(f"--> [OK] Web Server giữ cổng đã mở thành công trên port: {port}")
     
     print("--- HỆ THỐNG SIÊU AI VIỆT HÓA CHÍNH THỨC HOẠT ĐỘNG ---")
+    
+    # Xóa sạch webhook kẹt cũ và các tin nhắn dồn ứ trong lúc ngắt kết nối
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
