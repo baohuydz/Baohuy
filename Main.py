@@ -27,13 +27,14 @@ openrouter_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPEN
 
 dp = Dispatcher()
 
-# --- CÁC HÀM GỌI API ĐỒNG THỜI (ASYNC) ---
+# --- CÁC HÀM GỌI API AN TOÀN (Nếu lỗi tự trả về chuỗi trống) ---
 async def fetch_mistral(prompt: str) -> str:
     try:
-        res = await mistral_client.chat.complete_async(model="mistral-large-latest", messages=[{"role": "user", "content": prompt}])
+        res = await mistral_client.chat.complete_async(model="mistral-large-latest", messages=[{"role": "user", "content": prompt}], timeout=8)
         return f"[Mistral]: {res.choices[0].message.content}"
     except Exception as e:
-        return f"[Mistral Error]: {e}"
+        logging.warning(f"Mistral API bị lỗi hoặc chặn: {e}")
+        return "" # Trả về rỗng nếu bị chặn
 
 async def fetch_openrouter(prompt: str) -> str:
     try:
@@ -41,12 +42,14 @@ async def fetch_openrouter(prompt: str) -> str:
         def call():
             return openrouter_client.chat.completions.create(
                 model="deepseek/deepseek-chat",
-                messages=[{"role": "user", "content": prompt}]
+                messages=[{"role": "user", "content": prompt}],
+                timeout=8
             )
         res = await loop.run_in_executor(None, call)
         return f"[DeepSeek]: {res.choices[0].message.content}"
     except Exception as e:
-        return f"[DeepSeek Error]: {e}"
+        logging.warning(f"OpenRouter API bị lỗi hoặc chặn: {e}")
+        return ""
 
 async def fetch_groq(prompt: str) -> str:
     try:
@@ -54,12 +57,14 @@ async def fetch_groq(prompt: str) -> str:
         def call():
             return groq_client.chat.completions.create(
                 model="llama3-70b-8192",
-                messages=[{"role": "user", "content": prompt}]
+                messages=[{"role": "user", "content": prompt}],
+                timeout=8
             )
         res = await loop.run_in_executor(None, call)
         return f"[Llama3]: {res.choices[0].message.content}"
     except Exception as e:
-        return f"[Llama3 Error]: {e}"
+        logging.warning(f"Groq API bị lỗi hoặc chặn: {e}")
+        return ""
 
 async def fetch_gemini(prompt: str) -> str:
     try:
@@ -69,37 +74,45 @@ async def fetch_gemini(prompt: str) -> str:
         res = await loop.run_in_executor(None, call)
         return f"[Gemini]: {res.text}"
     except Exception as e:
-        return f"[Gemini Error]: {e}"
+        logging.warning(f"Gemini API bị lỗi hoặc chặn: {e}")
+        return ""
 
 # --- BỘ NÃO HỢP NHẤT & BIÊN TẬP VĂN PHONG CON NGƯỜI ---
 async def aggregate_responses(user_prompt: str, raw_responses: list) -> str:
-    combined_context = "\n\n=====\n\n".join(raw_responses)
+    # Lọc bỏ hoàn toàn các phản hồi trống (các AI bị chặn/lỗi)
+    valid_responses = [resp for resp in raw_responses if resp.strip()]
+    
+    # Nếu tất cả các AI đều sập, thông báo cho user
+    if not valid_responses:
+        return "Hiện tại tất cả các cổng kết nối AI đều đang bận hoặc bảo trì. Bạn vui lòng quay lại sau ít phút nhé!"
+        
+    combined_context = "\n\n=====\n\n".join(valid_responses)
     
     system_instruction = (
         "Bạn là một Siêu trí tuệ nhân tạo có năng lực thấu cảm và diễn đạt đỉnh cao như một chuyên gia con người thực thụ.\n"
-        "Dưới đây là câu trả lời từ 4 mô hình AI khác nhau (Gemini, Llama3, DeepSeek, Mistral) cho cùng một câu hỏi của người dùng.\n"
+        "Dưới đây là các câu trả lời từ các mô hình AI còn hoạt động cho câu hỏi của người dùng.\n"
         "Nhiệm vụ của bạn:\n"
-        "1. Đọc phản hồi từ cả 4 nguồn, loại bỏ các thông tin trùng lặp, chọn lọc ra những ý đúng nhất, sâu sắc và giá trị nhất.\n"
-        "2. Đúc kết và gộp chúng lại thành một câu trả lời duy nhất hoàn chỉnh.\n"
-        "3. QUAN TRỌNG NHẤT: Hãy viết lại bằng văn phong tự nhiên, mượt mà, rành mạch và cuốn hút của con người. "
-        "Tuyệt đối KHÔNG sử dụng các từ ngữ rập khuôn máy móc của AI (ví dụ: 'Dưới đây là...', 'Tóm lại...', 'Như vậy...'). Trả lời thẳng vào vấn đề, thể hiện sự thông minh và có cảm xúc phù hợp như hai người bạn đang trò chuyện.\n"
-        "4. Sử dụng định dạng Markdown (bôi đậm, gạch đầu dòng) để câu trả lời dễ đọc, trực quan."
+        "1. Đọc kỹ các dữ liệu thô, loại bỏ thông tin trùng lặp, giữ lại những ý đúng và sâu sắc nhất.\n"
+        "2. Đúc kết thành một câu trả lời duy nhất hoàn chỉnh.\n"
+        "3. QUAN TRỌNG NHẤT: Viết lại bằng văn phong tự nhiên, rành mạch, cuốn hút của con người. "
+        "Tuyệt đối KHÔNG dùng các từ ngữ rập khuôn máy móc của AI. Trả lời thẳng vào vấn đề, có cảm xúc như một người bạn.\n"
+        "4. Sử dụng định dạng Markdown đẹp mắt."
     )
     
-    prompt_to_master = f"{system_instruction}\n\n[CÂU HỎI CỦA USER]: {user_prompt}\n\n[DỮ LIỆU TỪ 4 AI]:\n{combined_context}"
+    prompt_to_master = f"{system_instruction}\n\n[CÂU HỎI CỦA USER]: {user_prompt}\n\n[DỮ LIỆU TỪ CÁC AI CON SỐNG]:\n{combined_context}"
     
+    # Sử dụng OpenRouter (DeepSeek) làm bộ não gộp, nếu OpenRouter cũng sập thì lấy đại 1 kết quả thô của AI còn sống
     try:
         loop = asyncio.get_event_loop()
         res = await loop.run_in_executor(None, lambda: openrouter_client.chat.completions.create(
             model="deepseek/deepseek-chat",
-            messages=[{"role": "user", "content": prompt_to_master}]
+            messages=[{"role": "user", "content": prompt_to_master}],
+            timeout=10
         ))
         return res.choices[0].message.content
     except Exception:
-        for resp in raw_responses:
-            if "Error" not in resp:
-                return resp.split("]: ", 1)[-1]
-        return "Xin lỗi, hệ thống siêu trí tuệ đang bận xử lý dữ liệu. Bạn vui lòng thử lại sau nhé!"
+        # Fallback: Trả về kết quả thô đầu tiên của AI nào còn sống sót
+        return valid_responses[0].split("]: ", 1)[-1]
 
 # --- XỬ LÝ SỰ KIỆN TELEGRAM ---
 @dp.message(CommandStart())
@@ -107,8 +120,8 @@ async def command_start_handler(message: types.Message) -> None:
     user_name = message.from_user.full_name
     await message.answer(
         f"🧠 **Chào {user_name}! Bạn đã kích hoạt Mạng lưới Siêu Trí Tuệ Gộp thành công!**\n\n"
-        f"Mọi câu hỏi sẽ được xử lý qua 4 core AI: *Mistral*, *DeepSeek*, *Llama 3*, *Gemini*.\n\n"
-        f"📢 *Bot được phát triển và bảo quyền bởi:* @baohuydevs"
+        f"Hệ thống tự động đồng bộ và tối ưu hóa dữ liệu từ nhiều nguồn AI khác nhau để phản hồi bằng giọng văn tự nhiên nhất.\n\n"
+        f"📢 *Bot được phát triển bởi:* @baohuydevs"
     )
 
 @dp.message()
@@ -116,7 +129,7 @@ async def handle_chat(message: types.Message) -> None:
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
     start_time = time.time()
     
-    # Gọi đồng thời các API AI
+    # Chạy đồng thời cả 4 cổng AI
     results = await asyncio.gather(
         fetch_mistral(message.text),
         fetch_openrouter(message.text),
@@ -124,7 +137,7 @@ async def handle_chat(message: types.Message) -> None:
         fetch_gemini(message.text)
     )
     
-    # Hợp nhất nội dung câu trả lời
+    # Hợp nhất nội dung từ những cổng không lỗi
     final_answer = await aggregate_responses(message.text, results)
     
     execution_time = round(time.time() - start_time, 2)
@@ -137,20 +150,18 @@ async def handle_chat(message: types.Message) -> None:
         f"🛡️ *Bản quyền thuộc về:* [BaoHuyDevs Team](https://t.me/baohuydevs)"
     )
     
-    # Cộng dồn phần bản quyền vào cuối tin nhắn
     final_answer += copyright_footer
     
     try:
         await message.answer(final_answer, parse_mode="Markdown", disable_web_page_preview=True)
     except Exception:
-        # Dự phòng nếu lỗi cú pháp Markdown do AI tạo ra ngoài ý muốn
         await message.answer(final_answer, parse_mode=None)
 
 async def main() -> None:
     keep_alive()
     bot = Bot(token=TELEGRAM_TOKEN)
-    print("--- HỆ THỐNG SIÊU TRÍ TUỆ ĐÃ KHỞI ĐỘNG THÀNH CÔNG ---")
-    await bot.delete_webhook(drop_pending_updates=True)
+    print("--- HỆ THỐNG PHÒNG THỦ LỖI API ĐÃ KHỞI ĐỘNG THÀNH CÔNG ---")
+    await bot.delete_webhook(drop_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
