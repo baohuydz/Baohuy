@@ -1,6 +1,4 @@
 aiogram
-groq
 google-genai
 openai
 flask
-httpx
