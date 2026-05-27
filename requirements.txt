@@ -1,6 +1,6 @@
-Flask
 aiogram
 groq
 google-genai
 openai
-mistralai
+flask
+httpx
