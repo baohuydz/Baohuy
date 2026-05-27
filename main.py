@@ -27,7 +27,7 @@ def keep_alive():
 # ==========================================
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-TOKEN = "6367532329:AAGYVm-U5l8jU8Kur_2WLmu9Gr9l5agRR9g"
+TOKEN = "6367532329:AAHUNIo2eLnCNSIle4b2IujI5Dumo0geYjI"
 ADMIN_IDS = [5736655322]            # Thay bằng ID Telegram thực tế của bạn
 ADMIN_USERNAME = "@tai_khoan_admin" # Tên liên hệ hỗ trợ hiển thị cho khách
 
