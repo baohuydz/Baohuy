@@ -1,151 +1,218 @@
-import asyncio
 import logging
-import sys
-import time
-import os
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
-from google import genai
-from openai import OpenAI
+import requests
+import io
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ==== KHỞI TẠO WEB SERVER ĐỂ RENDER QUÉT PORT ====
-from keep_alive import app
+# ==================== CẤU HÌNH THÔNG TIN ====================
+TELEGRAM_BOT_TOKEN = "6367532329:AAGYVm-U5l8jU8Kur_2WLmu9Gr9l5agRR9g"
+BASE_URL = "https://shop.getbasic.link/api/v1"
 
-# --- CẤU HÌNH TOKEN VÀ API KEY CHÍNH THỨC ---
-TELEGRAM_TOKEN = "6367532329:AAEe9f501-n72-ZKLv4s5I_4O51vgznyXao"
-GEMINI_API_KEY = "AIzaSyDD1NhOh6aX58SdnK-3A5MYiQG-AqPDfJM"
-OPENROUTER_API_KEY = "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"
+# Thay đổi tài khoản và mật khẩu đăng nhập web của bạn tại đây
+USER_EMAIL = "huydoan633@gmail.com"
+USER_PASSWORD = "036320"
 
-# --- KHỞI TẠO CÁC CỔNG AI TIẾNG VIỆT ---
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-openrouter_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+# Biến toàn cục hệ thống lưu trữ Token tạm thời sau khi đăng nhập
+CURRENT_BEARER_TOKEN = None
 
-dp = Dispatcher()
+# Cấu hình Nhật ký hệ thống (Log) để theo dõi luồng dữ liệu
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# --- CÁC HÀM GỌI API AN TOÀN ---
-async def fetch_gemini(prompt: str) -> str:
+
+# ==================== HÀM XỬ LÝ API HỆ THỐNG ====================
+
+def api_login_and_get_token():
+    """Gửi tài khoản mật khẩu lên API đăng nhập để lấy chuỗi Bearer Token"""
+    global CURRENT_BEARER_TOKEN
     try:
-        loop = asyncio.get_event_loop()
-        res = await loop.run_in_executor(None, lambda: gemini_client.models.generate_content(
-            model='gemini-1.5-flash', contents=prompt
-        ))
-        return f"[Gemini]: {res.text}" if res.text else ""
-    except Exception as e:
-        logging.warning(f"Gemini API gặp sự cố: {e}")
-        return ""
-
-async def fetch_openrouter(prompt: str) -> str:
-    try:
-        loop = asyncio.get_event_loop()
-        res = await loop.run_in_executor(None, lambda: openrouter_client.chat.completions.create(
-            model="deepseek/deepseek-chat", 
-            messages=[{"role": "user", "content": prompt}], 
-            timeout=8
-        ))
-        return f"[DeepSeek]: {res.choices[0].message.content}" if res.choices[0].message.content else ""
-    except Exception as e:
-        logging.warning(f"OpenRouter API gặp sự cố: {e}")
-        return ""
-
-# --- BỘ NÃO HỢP NHẤT DỮ LIỆU TIẾNG VIỆT (TÍNH NĂNG TỰ CỨU HỘ) ---
-async def aggregate_responses(user_prompt: str, raw_responses: list) -> str:
-    # Lọc bỏ các phản hồi trống nếu một trong hai AI bị nghẽn
-    valid_responses = [resp for resp in raw_responses if resp.strip()]
-    
-    if not valid_responses:
-        return "Hiện tại hệ thống AI đang bận xử lý dữ liệu. Bạn vui lòng thử lại sau ít phút nhé!"
+        # Endpoint login chuẩn hóa dựa trên tài liệu API hệ thống
+        login_url = f"{BASE_URL}/login" 
+        data = {
+            "email": USER_EMAIL,
+            "password": USER_PASSWORD
+        }
+        response = requests.post(login_url, data=data, timeout=10)
         
-    combined_context = "\n\n=====\n\n".join(valid_responses)
-    
-    system_instruction = (
-        "Bạn là một Siêu trí tuệ nhân tạo có năng lực thấu cảm và diễn đạt tiếng Việt đỉnh cao.\n"
-        "Dưới đây là dữ liệu thô thu thập được từ các mô hình AI.\n"
-        "Nhiệm vụ của bạn:\n"
-        "1. Đọc và đúc kết thông tin chính xác, loại bỏ các ý trùng lặp.\n"
-        "2. QUAN TRỌNG NHẤT: Viết lại toàn bộ câu trả lời bằng văn phong tiếng Việt tự nhiên, rành mạch, "
-        "cuốn hút như một người bạn chia sẻ, tuyệt đối không dùng các từ ngữ rập khuôn máy móc của AI.\n"
-        "3. Trả về định dạng Markdown trực quan, rõ ràng."
-    )
-    
-    prompt_to_master = f"{system_instruction}\n\n[CÂU HỎI CỦA USER]: {user_prompt}\n\n[DỮ LIỆU AI]:\n{combined_context}"
-    
-    try:
-        loop = asyncio.get_event_loop()
-        res = await loop.run_in_executor(None, lambda: openrouter_client.chat.completions.create(
-            model="deepseek/deepseek-chat", 
-            messages=[{"role": "user", "content": prompt_to_master}], 
-            timeout=10
-        ))
-        return res.choices[0].message.content
+        if response.status_code == 200:
+            res_data = response.json()
+            # Trích xuất Token từ phản hồi của Server
+            CURRENT_BEARER_TOKEN = res_data.get("token") or res_data.get("access_token")
+            logger.info("🔑 Đăng nhập hệ thống thành công! Đã cập nhật Token mới.")
+            return CURRENT_BEARER_TOKEN
+        else:
+            logger.error(f"❌ Đăng nhập thất bại. Mã phản hồi lỗi: {response.status_code}")
     except Exception as e:
-        logging.error(f"Bộ não gộp OpenRouter gặp lỗi: {e}")
-        
-        # --- CƠ CHẾ PHÒNG THỦ: NẾU DEEPSEEK LỖI, LẤY NGAY GEMINI ĐỂ TRẢ LỜI ---
-        for resp in valid_responses:
-            if "[Gemini]" in resp:
-                return resp.replace("[Gemini]: ", "")
-        
-        # Cứu hộ cuối cùng: Lấy bất cứ thứ gì còn sống để trả về
-        return valid_responses[0].split("]: ", 1)[-1]
+        logger.error(f"❌ Lỗi kết nối khi cố gắng đăng nhập: {e}")
+    return None
 
-# --- SỰ KIỆN BOT TELEGRAM ---
-@dp.message(CommandStart())
-async def command_start_handler(message: types.Message) -> None:
-    await message.answer(
-        f"🧠 **Chào {message.from_user.full_name}! Hệ thống Siêu AI Gộp Tiếng Việt đã kích hoạt!**\n\n"
-        f"Hệ thống đã tối ưu hóa, loại bỏ hoàn toàn các API tiếng Anh để tập trung phản hồi tiếng Việt với tốc độ cao nhất.\n\n"
-        f"📢 *Phát triển bởi:* [BaoHuyDevs Team](https://t.me/baohuydevs)",
-        disable_web_page_preview=True, parse_mode="Markdown"
-    )
+def get_auth_headers():
+    """Tự động kiểm tra và khởi tạo Header chứa Authorization Token"""
+    global CURRENT_BEARER_TOKEN
+    if not CURRENT_BEARER_TOKEN:
+        api_login_and_get_token()
+    return {"Authorization": f"Bearer {CURRENT_BEARER_TOKEN}"}
 
-@dp.message()
-async def handle_chat(message: types.Message) -> None:
-    await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    start_time = time.time()
-    
-    # Chạy song song 2 lõi AI thuần Tiếng Việt
-    results = await asyncio.gather(
-        fetch_gemini(message.text),
-        fetch_openrouter(message.text)
-    )
-    
-    final_answer = await aggregate_responses(message.text, results)
-    execution_time = round(time.time() - start_time, 2)
-    
-    # --- AUTO CHÈN THƯƠNG HIỆU ---
-    copyright_footer = (
-        f"\n\n"
-        f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-        f"⚙️ *Hợp nhất dữ liệu trong:* {execution_time}s\n"
-        f"🛡️ *Bản quyền thuộc về:* [BaoHuyDevs Team](https://t.me/baohuydevs)"
-    )
-    final_answer += copyright_footer
-    
+def api_get_balance():
+    """Gọi API kiểm tra số dư hiện tại của tài khoản"""
     try:
-        await message.answer(final_answer, parse_mode="Markdown", disable_web_page_preview=True)
-    except Exception:
-        # Nếu định dạng Markdown bị lỗi ký tự đặc biệt, gửi văn bản thô để chống im lặng
-        await message.answer(final_answer, parse_mode=None)
+        response = requests.get(f"{BASE_URL}/balance", headers=get_auth_headers(), timeout=10)
+        
+        # Nếu Token hết hạn (401), tiến hành đăng nhập lại tự động và thử lại lần nữa
+        if response.status_code == 401:
+            api_login_and_get_token()
+            response = requests.get(f"{BASE_URL}/balance", headers=get_auth_headers(), timeout=10)
+            
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        logger.error(f"Lỗi API kiểm tra số dư: {e}")
+    return None
 
-# --- KHỞI CHẠY ĐỒNG BỘ PORT VÀ BOT ---
-async def start_server_and_bot():
-    bot = Bot(token=TELEGRAM_TOKEN)
-    port = int(os.environ.get("PORT", 8080))
+def api_register_udid(udid, plan):
+    """Gọi API thực hiện đăng ký UDID mới vào hệ thống"""
+    data = {"udid": udid, "plan": str(plan)}
+    try:
+        response = requests.post(f"{BASE_URL}/register", headers=get_auth_headers(), data=data, timeout=10)
+        
+        if response.status_code == 401:
+            api_login_and_get_token()
+            response = requests.post(f"{BASE_URL}/register", headers=get_auth_headers(), data=data, timeout=10)
+            
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        logger.error(f"Lỗi API đăng ký UDID: {e}")
+    return None
+
+def api_check_provision(order_id):
+    """Gọi API tra cứu thông tin chứng chỉ và trạng thái đơn hàng"""
+    try:
+        response = requests.get(f"{BASE_URL}/provision?order_id={order_id}", headers=get_auth_headers(), timeout=10)
+        
+        if response.status_code == 401:
+            api_login_and_get_token()
+            response = requests.get(f"{BASE_URL}/provision?order_id={order_id}", headers=get_auth_headers(), timeout=10)
+            
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        logger.error(f"Lỗi API tra cứu đơn hàng: {e}")
+    return None
+
+
+# ==================== LOGIC XỬ LÝ BOT TELEGRAM ====================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lệnh /start: Thiết lập giao diện nút bấm Menu tương tác"""
+    keyboard = [
+        [KeyboardButton("💰 Kiểm tra số dư"), KeyboardButton("🔎 Tra cứu đơn hàng")],
+        [KeyboardButton("📝 Đăng ký UDID (Gói 3)"), KeyboardButton("📝 Đăng ký iPad (Gói 12)")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
-    # Khởi động Flask giữ Port cho Render ngay lập tức
-    from werkzeug.serving import make_server
-    server = make_server('0.0.0.0', port, app)
+    await update.message.reply_text(
+        "👋 Chào mừng bạn đến với Bot quản lý dịch vụ Apple Cert tự động!\n"
+        "Vui lòng chọn tính năng cần thao tác ở thanh Menu bên dưới.",
+        reply_markup=reply_markup
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Điều hướng xử lý dữ liệu và hành động của người dùng"""
+    text = update.message.text
+    user_data = context.user_data
+
+    # Chức năng: Kiểm tra số dư ví tiền
+    if text == "💰 Kiểm tra số dư":
+        res = api_get_balance()
+        if res and res.get("status") == "200":
+            balance = res.get("balance", 0)
+            await update.message.reply_text(f"💳 Số dư tài khoản hiện tại: *{balance:,}đ*", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ Không lấy được thông tin số dư. Vui lòng kiểm tra lại cấu hình tài khoản web.")
+
+    # Chức năng: Đăng ký UDID mới cho iPhone (Gói 3)
+    elif text == "📝 Đăng ký UDID (Gói 3)":
+        user_data['action'] = 'waiting_udid_g3'
+        await update.message.reply_text("📥 Vui lòng nhập hoặc gửi chuỗi **UDID iPhone** (Gói 3):", parse_mode="Markdown")
+
+    # Chức năng: Đăng ký UDID mới cho iPad (Gói 12)
+    elif text == "📝 Đăng ký iPad (Gói 12)":
+        user_data['action'] = 'waiting_udid_g12'
+        await update.message.reply_text("📥 Vui lòng nhập hoặc gửi chuỗi **UDID iPad** (Gói 12):", parse_mode="Markdown")
+
+    # Chức năng: Tra cứu trạng thái đơn hàng để nhận Chứng chỉ (.p12, .mobileprovision)
+    elif text == "🔎 Tra cứu đơn hàng":
+        user_data['action'] = 'waiting_order_id'
+        await update.message.reply_text("📥 Vui lòng nhập **Mã đơn hàng (Order ID)** bạn cần kiểm tra:")
+
+    # Xử lý nhập văn bản tự do dựa trên trạng thái (State) người dùng lựa chọn trước đó
+    else:
+        current_action = user_data.get('action')
+
+        # Xử lý khi nhận được chuỗi UDID gửi lên hệ thống đăng ký
+        if current_action in ['waiting_udid_g3', 'waiting_udid_g12']:
+            udid = text.strip()
+            plan = "3" if current_action == 'waiting_udid_g3' else "12"
+            
+            await update.message.reply_text("⏳ Đang xử lý yêu cầu đăng ký lên máy chủ, vui lòng đợi giây lát...")
+            res = api_register_udid(udid, plan)
+            
+            if res and res.get("status") == "200":
+                msg = (
+                    f"✅ **Gửi đơn đăng ký thành công!**\n\n"
+                    f"🔹 Mã đơn hàng: `{res.get('order_id')}`\n"
+                    f"🔹 Số dư tài khoản: {res.get('balance'):,}đ\n"
+                    f"🔹 Trạng thái xử lý: {res.get('message')}\n\n"
+                    f"👉 Copy mã đơn hàng trên và bấm nút **Tra cứu đơn hàng** để tải Cert về."
+                )
+                await update.message.reply_text(msg, parse_mode="Markdown")
+            else:
+                await update.message.reply_text("❌ Đăng ký thất bại. Lý do: Số dư khả dụng không đủ hoặc định dạng chuỗi UDID không chính xác.")
+            
+            user_data['action'] = None  # Xóa trạng thái hàng chờ
+
+        # Xử lý khi nhận mã đơn hàng để tải bộ chứng chỉ về thiết bị
+        elif current_action == 'waiting_order_id':
+            order_id = text.strip()
+            await update.message.reply_text(f"⏳ Đang tra cứu dữ liệu đơn hàng `{order_id}`...")
+            res = api_check_provision(order_id)
+            
+            if res and res.get("status") == "200":
+                status = res.get("message")
+                
+                if status == "completed":
+                    p12_url = res.get("p12")
+                    provision_text = res.get("provision")
+                    
+                    await update.message.reply_text(f"🟢 Đơn hàng đã hoàn thành xử lý!\n\n📦 Link tải File P12:\n{p12_url}\n\n⏳ Bot đang sinh file vật lý định dạng `.mobileprovision` gửi trực tiếp cho bạn...")
+                    
+                    # Chuyển đổi mã chuỗi Text XML sang định dạng File Binary trực tuyến không lưu ổ cứng
+                    if provision_text:
+                        file_io = io.BytesIO(provision_text.encode('utf-8'))
+                        file_io.name = f"{order_id}.mobileprovision"
+                        await update.message.reply_document(document=file_io, caption=f"📄 Bản gốc file Provision cho đơn hàng `{order_id}`", parse_mode="Markdown")
+                else:
+                    await update.message.reply_text(f"🟡 Đơn hàng của bạn đang ở trạng thái: `{status}`. Vui lòng quay lại kiểm tra sau ít phút.")
+            else:
+                await update.message.reply_text("❌ Sai mã đơn hàng hoặc hệ thống Server đang bảo trì.")
+            
+            user_data['action'] = None  # Xóa trạng thái hàng chờ
+        else:
+            await update.message.reply_text("⚠️ Vui lòng thao tác lựa chọn một chức năng cụ thể trên Menu bàn phím điều hướng.")
+
+
+def main():
+    """Hàm khởi tạo chạy Polling quét cập nhật tiến trình của Bot Telegram"""
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, server.serve_forever)
-    print(f"--> [OK] Web Server giữ cổng đã mở thành công trên port: {port}")
+    # Thiết lập bộ lắng nghe sự kiện Lệnh và Văn bản tin nhắn từ người dùng
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("--- HỆ THỐNG SIÊU AI VIỆT HÓA CHÍNH THỨC HOẠT ĐỘNG ---")
-    
-    # Xóa sạch webhook kẹt cũ và các tin nhắn dồn ứ trong lúc ngắt kết nối
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    # Kích hoạt trạng thái hoạt động trực tuyến liên tục
+    print("🤖 Bot Telegram Apple Cert đã khởi chạy hoàn tất và đang hoạt động...")
+    application.run_polling()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-    asyncio.run(start_server_and_bot())
+    main()
