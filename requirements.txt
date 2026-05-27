@@ -2,3 +2,5 @@ aiogram
 google-genai
 openai
 flask
+python-telegram-bot
+requests
