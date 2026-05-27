@@ -3,4 +3,4 @@ aiogram
 groq
 google-genai
 openai
-mistralai>=1.0.0
+mistralai
